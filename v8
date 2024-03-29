@@ -1,0 +1,1194 @@
+@requires [msi.gama.core, ummisco.gaml.extensions.stats, ummisco.gama.java2d]
+
+/**
+* Name: CWDCA
+* Based on the internal empty template. 
+* Author: Carlos González-Crespo
+* Tags: 
+*/
+
+
+model CWDCA
+
+/* Insert your model definition here */
+
+global {
+  file WEI <- file("../includes/CNS_NECA/ASCrastweigscale.asc");
+  file K <- file("../includes/CNS_NECA/ASCrastCarrK.asc");
+  file ABU <- file("../includes/CNS_NECA/ASCrastabund.asc");
+  file RNG <- file("../includes/CNS_NECA/ASCrastRangeN.asc");
+  file MigraN <- file("../includes/CNS_NECA/ASCrastMigraN.asc");
+  file HUNTING <- file("../includes/CNS_NECA/ASCrastHunt.asc");
+  file SCAV <- file("../includes/CNS_NECA/ASCrastScav.asc");
+  // Parameters for the global environment
+  // ...string Scenario <- 'GSA';
+  string DCUs<-'CNS_NECA';
+  bool ExportSim <- true;
+  geometry shape <- envelope(WEI);
+  map<grid_agent, float> cell_weights;
+  date starting_date <- date([2024,7,1,1,0,0]);
+  float seed <- 11.0;//int(self) + 10.0;
+  int SimLeng<- 365*5; //5 years
+  int current_daysim <- 180 update:(current_daysim+1) mod 365 min: 1;
+  int total_days update: int (time / #day) min:1;
+  float step <- 1 #day;
+  int spring_start <- 105; // Day of the year when spring migration starts
+  int fall_start <- 288; // Day of the year when fall migration starts
+  int summer_start<-171;
+  int winter_start<-354;
+  int LG_start <- 91;
+  int F_start <- 136;
+  int PR_start <- 213;
+  int R_start <- 305;
+  int EG_start <- 350;
+
+ string seasons<- "summer";
+  string PDseasons<- "F";
+  float annual_EV;
+  bool drought <- false;
+  int drought_period;
+  int drought_days;
+ // bool fire_season;
+  float fire_p<-0.005;
+  float fire_probability <- 0.005;//one_of(fire_p,fire_p*2,fire_p*3);
+  float fire_probabilityS;
+  
+  
+  // Parameters for the mule deer agent
+  // ...
+  int initial_pop<- 500000;
+  float pop_scale <- 0.05;//one_of (0.25,0.5,1.0);
+  int reproduction_start <- 136; // Day of the year when reproduction starts
+  int reproduction_end <- 170; // Day of the year when reproduction ends?????
+  bool repro_season <- false update: (current_daysim >= reproduction_start) and (current_daysim <= reproduction_end);
+  int nb_ofs <- 2;
+  float annual_mortality_rate <- 0.15; // annual mortality rate
+  float annual_mortality_rateS;
+  float mortality_rate_fawn <- 0.65; // Modify by season Fawn survival rate (F and PR; other seasons)	0.44; 0.61
+  float mortality_rate_fawnS;
+  float mortality_rate_YandA <- 0.15; // example value, adjust as necessary
+  float DispersionProbaM<-0.6;
+  float DispersionProbaF<-0.35;
+  float annual_reproduction_rate <- 0.87; // annual reproduction rate
+  float speedD<- 16.0 #km/#day;// Walking speed
+
+    int Carc_tot;
+  	int MD_tot;
+  	int susMD;
+    int expMD;//{ (mule_deer) count (each.is_exposed)};
+    int infMD;// <- { (mule_deer) count (each.is_infected)};
+  	list<mule_deer> EXP;// update: mule_deer where each.is_exposed;
+	list<mule_deer> INF;// update: mule_deer where each.is_infected;
+	list<mule_deer> SUS;// update: mule_deer where each.is_susceptible;  
+	list<mule_deer> MDagents;
+	
+reflex PDseasons_scheduler{
+  	if (current_daysim = LG_start) {
+        PDseasons <- "LG";
+       
+      } else if (current_daysim = F_start) {
+        PDseasons <- "F";
+             
+      } else if (current_daysim = PR_start){
+      	 PDseasons <- "PR";
+      
+      } else if (current_daysim = R_start){
+       PDseasons <- "R";
+      }else if (current_daysim = EG_start){
+      	 PDseasons <- "EG";
+      }
+  }
+  
+reflex seasons_scheduler {
+  	 if (current_daysim = spring_start) {
+        seasons <- "spring";
+      } else if (current_daysim = fall_start) {
+        seasons <- "fall";
+      } else if (current_daysim = summer_start){
+      	 seasons <- "summer";
+      } else if (current_daysim = winter_start){
+       seasons <- "winter";
+      }
+ 	}
+
+reflex stochasticity when: current_daysim =1 {
+   		ask grid_agent{
+   			burn_test <- false;
+   		}
+   		if not drought{
+   			if flip (0.20) {
+   			drought_period <- rnd(365 ,1460); //between 1-4 years
+   			drought <- true;
+   			fire_probabilityS <- fire_probability*2;//double % of wild fire if drought year
+   			annual_mortality_rateS<- annual_mortality_rate*1.15;
+   			mortality_rate_fawnS<-mortality_rate_fawn*1.15;
+   			ask grid_agent{
+   			cK <- CarryingK*0.75;
+   		}
+   		} else {
+   			drought <- false;
+   			fire_probabilityS <- fire_probability;
+   			annual_mortality_rateS<- annual_mortality_rate;
+   			mortality_rate_fawnS<-mortality_rate_fawn;
+   		}
+   		}
+   		
+   }
+   
+reflex drought_mg when: drought{
+   	drought_days <- drought_days +1;
+   	if drought_days >= drought_period{
+   		drought <- false;
+   		fire_probabilityS <- fire_probability;
+  		annual_mortality_rateS<- annual_mortality_rate;	
+   	} else {
+   		drought <- true;
+   		ask grid_agent{
+   			cK <- CarryingK;
+   		}
+   	}
+   }
+	
+reflex mother_initial when: total_days =2 {
+ 	  ask mule_deer where (each.state = "Fawn"){
+        	if mule_mother = nil{
+        		 mule_mother <-one_of (mule_deer where ((each.state = "Adult")and (not is_male)));
+        		//  my_cell <- mule_mother.my_cell;
+        	}
+        }
+ }
+	
+reflex update_MDCWD{
+   SUS<-mule_deer where each.is_susceptible;  
+   EXP<-mule_deer where each.is_exposed;
+   INF<-mule_deer where each.is_infected;
+   MDagents <- SUS+EXP+INF;
+   susMD<- length(SUS);
+   expMD<- length(EXP);
+   infMD<- length(INF);
+   MD_tot<- length(mule_deer);
+   Carc_tot<- length(carcass);
+  }
+  
+reflex SaveData when:ExportSim {
+        save [int(self), cycle, total_exposed, total_infected, pop_scale, fire_probability,
+        	total_carcasses, total_hunted, total_culled, detection_parameter, 
+        	surveillance_effect, surveillance_harvest, initial_response, culling, 
+        	target_reduction_ratio, duration_harvest, carcass_rate      
+        ] to: '../results/' + DCUs + '/EC/EpiCurve_' + string(int(self)) + '.csv' format: 'csv' rewrite: false;
+    }
+  
+//epidemiological module
+  float cwdsol<- 0.64;
+  float cwdmort_R_EG <- 1.83; // Survival rate when clinical CWD starts - 0.17(R and EG seasons)
+  float cwdmort_Other <- 1.48; // Survival rate when clinical CWD starts - 0.52(other seasons)
+  float beta <- 0.85; // Within group transmission rate
+  float beta_per_day <- beta / 365;
+  float beta_prime <- 0.0002; // Environmental transmission rate
+  float beta_prime_per_day <- beta_prime / 365;
+  float beta_c <- 0.037; // Probability of transmission from carcass given a contact
+    float delta_ff <- 0.52; // Interaction rate
+    float delta_fm <- 1.04; // Interaction rate
+    float delta_mf <- 0.52; // Interaction rate
+    float delta_mm <- 1.91; // Interaction rate
+    float food_consumption_rate_f <- 0.93; // Food consumption rate
+    float food_consumption_rate_m <- 0.88; // Food consumption rate
+    float food_consumption_rate_fa <- 1.19; // Food consumption rate
+  	float rho <- 0.000166 ; // Probability of visiting a carcass each step
+ 
+//Outbreak detection and management
+float detection_parameter<- 1.2;//one_of(0.9, 1.2, 2.0);
+float surveillance_effect<- 1.0;//one_of(0.8,1.0,1.2);
+float current_surv_harv<-0.04;
+float surveillance_harvest<-0.04;//one_of(current_surv_harv,current_surv_harv*3,current_surv_harv*6);
+int initial_response<-30 ;//one_of(15,30,60);
+int culling<-0;//one_of(0,1);
+float target_reduction_ratio <- 0.1;//one_of(0.1,0.2,0.3);
+int duration_harvest <-30;//one_of(30, 60);
+float carcass_rate<- 0.3;//one_of (0.3, 0.5, 0.8);	
+float daily_carcass_rate<- (carcass_rate/duration_harvest);
+
+  int total_exposed <- 1;
+  int total_infected <- 1;
+  int total_carcasses <- 0;
+  int total_hunted <- 0;
+  int total_culled <- 0;
+  
+  
+  init {
+   	ask grid_agent {
+        Weights <- (bands[0]);
+		CarryingK <- (bands[1]);
+		abund <- int (bands[2]);
+		Range <- int (bands[3]);
+		migratory <- int (bands[4]);
+		hunt <- int (bands[5]);
+		scavengers <- int(bands[6]);
+		
+		
+        grid_value <- grid_value * 5;
+        cK<-CarryingK;
+        float max_val <- grid_agent max_of (each.grid_value);
+        ask grid_agent {
+          float val <- 255 * (1 - grid_value / max_val);
+          color <- rgb(val, val, val);
+        }
+        cell_weights <- grid_agent as_map (each::each.grid_value);
+      
+      	create mule_deer number: (pop_scale*abund)*0.34 {//
+      	age_days<- rnd(182,290);
+      	if flip(0.5){
+      		is_male<-true;
+      	}else{
+      		is_male<-false;
+      	}
+      	location <- myself.location;
+      	my_cell<-myself;
+      	Residence_cell<-myself;
+      	   	is_susceptible<-true;
+    	is_exposed <- false;
+    	is_infected <- false;
+      }
+      create mule_deer number: (pop_scale*abund)*0.011 {
+      	age_days<- rnd(400,655);
+      	is_male<-true;
+      	location <- myself.location;
+      	my_cell<-myself;
+      	Residence_cell<-myself;
+      	   	is_susceptible<-true;
+    	is_exposed <- false;
+    	is_infected <- false;
+      }
+       create mule_deer number:(pop_scale*abund)*0.14 {
+      	age_days<- rnd(400,655);
+      	is_male<-false;
+      	location <- myself.location;
+      	my_cell<-myself;
+      	Residence_cell<-myself;
+      	   	is_susceptible<-true;
+    	is_exposed <- false;
+    	is_infected <- false;
+      }
+      create mule_deer number: (pop_scale*abund)*0.09 {
+      	age_days<- rnd(731,3649);
+      	is_male<-true;
+      	location <- myself.location;
+      	my_cell<-myself;
+      	Residence_cell<-myself;
+      	   	is_susceptible<-true;
+    	is_exposed <- false;
+    	is_infected <- false;
+      }
+      create mule_deer number: (pop_scale*abund)*0.25 {
+      	age_days<- rnd(731,3649);
+      	is_male<-false;
+      	location <- myself.location;
+      	my_cell<-myself;
+      	Residence_cell<-myself;
+      	is_susceptible<-true;
+    	is_exposed <- false;
+    	is_infected <- false;
+      }
+      create mule_deer number: (pop_scale*abund)*0.02 {
+      	age_days<- rnd(3660,5000);
+      	is_male<-true;
+      	location <- myself.location;
+      	my_cell<-myself;
+      	Residence_cell<-myself;
+      	is_susceptible<-true;
+    	is_exposed <- false;
+    	is_infected <- false;
+      }
+      create mule_deer number: (pop_scale*abund)*0.05 {
+      	age_days<- rnd(3660,5000);
+      	is_male<-false;
+      	location <- myself.location;
+      	my_cell<-myself;
+      	Residence_cell<-myself;
+      	is_susceptible<-true;
+    	is_exposed <- false;
+    	is_infected <- false;
+      }
+    
+      }
+      ask 1 among (mule_deer){
+      	is_susceptible<-false;
+    	is_exposed <- false;
+    	is_infected <- true;
+      }
+      ask (mule_deer){
+      	if my_cell.migratory = 1{
+      		is_migratory<-true;
+      	}else if (my_cell.migratory = 3){
+      		is_migratory<-false;
+      	}else {
+      		 is_migratory <- flip(0.5);
+      	}
+      }
+    }
+   
+ 
+  }
+
+
+// Species mule_deer which can move using the skill moving and its operators
+species mule_deer skills: [moving] control: fsm{
+  // Parameters for mule deer
+  float size <- 500.0;
+  rgb color <- #blue;
+  bool is_solitary <- false;
+  bool is_susceptible;
+   bool is_exposed;
+   bool is_infected;
+   bool is_migratory;
+  int infected_deer_cell;
+  bool migrated<- false;
+  grid_agent my_cell;
+  grid_agent Residence_cell;
+  bool is_male;
+  int group_id;
+  int age_days;
+  string my_group <- "none";
+  bool fawning<-false;
+  mule_deer mule_mother;
+  float mortality_rate_oldM update: (-0.29*((age_days)/365)-3.4); // example value, adjust as necessary
+  float mortality_rate_oldF update: (-0.17*((age_days)/365)-2.72); // example value, adjust as necessary
+  float lambdaFa;
+  float lambdaF;
+  float lambdaM;
+  float lambda_Gf;
+float lambda_Gm;
+float lambda_Gfa;
+float lambda_Ef;
+float lambda_Em;
+float lambda_Efa;
+float lambdaC;
+
+  // Reflexes for mule deer
+reflex grow { 
+  	age_days <- age_days + 1;
+  }
+
+grid_agent choose_cellK  {
+		grid_agent my_cell_temp<-  (my_cell.neighbors4) where (each.K_moment >= (each.K_moment*0.2)) closest_to self;
+		if my_cell_temp != nil {
+			return my_cell_temp;
+		} else {
+			return one_of ((my_cell.neighbors1) with_min_of (each.Weights));
+		}
+	}
+	
+grid_agent choose_cellM{
+		grid_agent my_cell_tmp <- ((my_cell.neighbors10) where (each.Range = 2) closest_to self);
+		if my_cell_tmp != nil {
+			return my_cell_tmp;
+			migrated <- true;//incluir las estaciones
+		} else {
+			return one_of ((my_cell.neighbors1) with_min_of (each.Weights));
+		}
+	}
+
+grid_agent choose_cellD  {
+		grid_agent my_cell_temp<-  (my_cell.neighbors4) where (each.Range != 2) where (each.K_moment >= (each.K_moment*0.3)) closest_to self;
+		if my_cell_temp != nil {
+			return my_cell_temp;
+		} else {
+			return one_of ((my_cell.neighbors1) with_min_of (each.Weights));
+		}
+	}
+ int number_of_infected_deer;
+ int number_of_female_deer;
+ int number_of_infected_female_deer;
+ int number_of_male_deer;
+ int number_of_infected_male_deer ;
+ int number_of_fawn_deer;
+ int number_of_infected_fawn_deer;
+ 
+reflex calculate_infection_probability_parameters when: my_cell.number_of_infected_deer >=1{
+  
+    list<mule_deer> MD_group<-my_cell.MD_agents where (each.my_group = my_group);
+    // Calculate the number of deer in the group
+    int number_of_deer_G <- length(MD_group);
+	if number_of_deer_G >=1{
+	 // Calculate the number of infected deer in the group
+     number_of_infected_deer <- length(MD_group where (each.is_infected));
+
+    // Calculate the number of female and infected female deer in the group
+     number_of_female_deer <- length(MD_group where (not each.is_male));
+     number_of_infected_female_deer <- length(MD_group where (not each.is_male and each.is_infected));
+
+    // Calculate the number of male and infected male deer in the group
+     number_of_male_deer <- length(MD_group where ( each.is_male));
+     number_of_infected_male_deer <- length(MD_group where ( each.is_male and each.is_infected));
+
+    // Calculate the number of fawn and infected fawn deer in the group
+     number_of_fawn_deer <- length(MD_group where (each.state = "Fawn"));
+     number_of_infected_fawn_deer <- length(MD_group where (each.state = "Fawn" and each.is_infected));
+  	
+	}
+   
+
+    // Continue with your calculations...
+  lambdaC<-(beta_c*rho*my_cell.number_of_carcasses);
+	// Lambda calculations
+ lambda_Gf <- beta_per_day * (delta_mf * number_of_infected_male_deer / number_of_male_deer 
+                                  + delta_ff * (number_of_infected_female_deer + number_of_infected_fawn_deer) 
+                                  / (number_of_female_deer + number_of_fawn_deer));
+
+ lambda_Gm <- beta_per_day * (delta_mm * number_of_infected_male_deer / number_of_male_deer 
+                                  + delta_fm * (number_of_infected_female_deer + number_of_infected_fawn_deer) 
+                                  / (number_of_female_deer + number_of_fawn_deer));
+
+ lambda_Gfa <- beta_per_day * (delta_mf * number_of_infected_male_deer / number_of_male_deer 
+                                   + delta_ff * (number_of_infected_female_deer + number_of_infected_fawn_deer) 
+                                   / (number_of_female_deer + number_of_fawn_deer));
+                                   
+// Lambda calculations for environmental transmission
+ lambda_Ef <- beta_prime_per_day * food_consumption_rate_f * infected_deer_cell;
+ lambda_Em <-  beta_prime_per_day * food_consumption_rate_m * infected_deer_cell;
+ lambda_Efa <-  beta_prime_per_day * food_consumption_rate_fa * infected_deer_cell;
+ 
+ //Calculate lambda
+ if state = "Fawn"{
+		lambdaFa<-lambda_Gfa+lambda_Efa+lambdaC;
+	} else if (is_male){
+		lambdaM<-lambda_Gm+lambda_Em+lambdaC;
+	} else{
+		lambdaF<-lambda_Gf+lambda_Ef+lambdaC;
+	}
+}
+
+//reflex calculate_lambda when:my_cell.number_of_infected_deer>=1{
+//	if state = "Fawn"{
+//		lambdaFa<-lambda_Gfa+lambda_Efa+lambdaC;
+//	} else if (is_male){
+//		lambdaM<-lambda_Gm+lambda_Em+lambdaC;
+//	} else{
+//		lambdaF<-lambda_Gf+lambda_Ef+lambdaC;
+//	}
+//}
+
+reflex moveK when: location != my_cell{
+		do goto (on:cell_weights, target:my_cell, speed:speedD, recompute_path: false);
+		my_group <- "none";
+	} 
+reflex moveM when: location != my_cell and is_migratory and migrated = false and ((seasons = "spring") or (seasons = "fall")) {//and ((seasons = "spring") or (seasons = "fall"))
+		do goto (on:cell_weights, target:my_cell, speed:speedD, recompute_path: false);
+		my_group <- "none";
+	}
+
+
+reflex assign_mother when: (state = "Fawn" and mule_mother = nil) and length(mule_deer where (not each.is_male and each.state = "Adult")) >= 1 {
+    mule_mother <- one_of (mule_deer where (not each.is_male and each.state = "Adult"));
+}
+
+action new_born{
+	loop times: nb_ofs{
+		if flip(0.5){
+			create (mule_deer) number:1{
+		is_male<-true;
+		age_days<- 1;
+		location <- myself.location;
+        my_cell <- myself.my_cell;	
+        Residence_cell<-myself.my_cell;
+        mule_mother<- myself;
+        is_susceptible<-true;
+		is_exposed<-false;
+		is_infected<-false;
+			}
+		}else{
+			create (mule_deer) number:1{
+		is_male<-false;
+		age_days<- 1;
+		location <- myself.location;
+        my_cell <- myself.my_cell;	
+        Residence_cell<-myself.my_cell;
+        mule_mother<- myself;
+        is_susceptible<-true;
+		is_exposed<-false;
+		is_infected<-false;
+			}
+		}	
+	}  
+}
+
+action die_carcass{
+		create (carcass)  {
+			location <- myself.location ; 
+			time_environment <- 0;
+			my_cell<- myself.my_cell;
+			
+		}
+		my_cell.nb_carcass<-my_cell.nb_carcass+1;
+		total_carcasses<-total_carcasses+1;
+  	do die;
+}
+
+action DispersalY {
+	do goto (on:cell_weights, target:my_cell, speed:speedD, recompute_path: false);
+	my_group <- "none";
+}
+
+int conta_exposition;
+int exposition_inf;
+action exposition_cwd{
+		is_susceptible<-false;
+		is_exposed<-true;
+		is_infected<-false;
+		exposition_inf<- rnd(180,270);
+		total_exposed <- total_exposed + 1; // Update global exposed count
+		my_cell.nb_expositions<-my_cell.nb_expositions+1; // Update cell exposed count
+		// exposition_inf<- rnd(10,20);
+	}
+
+action get_infected{
+	    is_susceptible<-false;
+		is_exposed<-false;
+		is_infected<-true;
+		total_infected <-total_infected +1;
+		conta_exposition <-0;
+		if flip (cwdsol){
+			 is_solitary <- true;
+		}
+}	
+
+reflex expo_infect when:is_exposed{
+	conta_exposition<-conta_exposition+1;
+	if conta_exposition >=exposition_inf{
+		do get_infected;
+	}
+	
+}
+
+//surveillance for initial detection, (ideal: sampling :10 months (following hunting season) ;
+//visual 15 months (first symptoms) worst scenario 24 months- 
+bool is_detected<-false;
+int conta_infection;
+
+reflex infection_manag when:is_infected{
+	conta_infection<- conta_infection+1;
+	if conta_infection>= ((365*detection_parameter)*surveillance_effect){
+		is_detected<- true;
+	}
+} 	
+
+	
+aspect base {
+		draw square (size) color: is_infected ? #red : color;
+	}
+	// Set up the age categories as states
+    state Fawn initial: true {
+        enter { 
+        	if mule_mother !=nil{
+        my_cell <- mule_mother.my_cell;
+        }else{
+        	my_cell <-my_cell;
+        }
+        }
+       
+        if flip(mortality_rate_fawnS / 365) {
+  	do die;
+	}
+
+	if is_susceptible and flip (lambdaFa){
+		do exposition_cwd;
+	}
+	
+	if is_infected{
+		if PDseasons ="R" or "RG"{
+			if flip((mortality_rate_fawnS*cwdmort_R_EG )/ 365) {
+		do die_carcass;
+	}
+		} else{
+			if flip((mortality_rate_fawnS*cwdmort_Other )/ 365) {
+			do die_carcass;
+	}
+		}
+	} else{
+		if flip(mortality_rate_fawnS / 365) {
+  	do die;
+	} 
+	}    
+        exit {         
+        }
+        transition when: age_days >= 365 to: Yearling;      
+    }
+    
+    state Yearling {
+        enter {          
+        }
+       bool Disperse<- false;
+       if repro_season and not Disperse{
+        if is_male {
+        	if flip(DispersionProbaM){
+        my_cell <- choose_cellD();
+		do DispersalY;
+        }  
+        }else if flip(DispersionProbaF){
+		my_cell <- choose_cellD();
+		do DispersalY;}	
+		Disperse<-true;}
+
+	if is_susceptible{
+		if is_male{
+			if flip (lambdaM){
+	do exposition_cwd;
+			}
+		}else{if flip (lambdaF){
+	do exposition_cwd;
+			}			
+		}
+	}
+
+	if is_infected{
+		if PDseasons ="R" or "RG"{
+			if flip((annual_mortality_rateS*cwdmort_R_EG )/ 365) {
+	do die_carcass;
+	}
+		} else{
+			if flip((annual_mortality_rateS*cwdmort_Other )/ 365) {
+	do die_carcass;
+	}
+		}
+	} else {
+		if flip(annual_mortality_rateS / 365) {
+  	do die;
+	} 
+	}		
+        exit {          
+        }
+        transition when: age_days >= 730 to: Adult;     
+    }
+    
+    state Adult {
+        enter {        
+        }
+        if repro_season and not is_male and not fawning{
+  		if flip(annual_reproduction_rate / (reproduction_end - reproduction_start + 1)) {
+  		fawning <- true;
+  		do new_born;}
+		}
+		if fawning and not repro_season{
+	 	fawning<-false;}
+	 	
+	if is_susceptible{
+		if is_male{
+			if flip (lambdaM){
+	do exposition_cwd;
+			}
+		}else{if flip (lambdaF){
+	do exposition_cwd;
+			}	
+		}
+	}
+	
+	if is_infected{
+		if PDseasons ="R" or "RG"{
+			if flip((annual_mortality_rateS*cwdmort_R_EG )/ 365) {
+		do die_carcass;
+	}
+		} else{
+			if flip((annual_mortality_rateS*cwdmort_Other )/ 365) {
+		do die_carcass;
+	}
+		}
+	} else{
+	if flip(annual_mortality_rateS / 365) {
+  	do die;
+	}
+	}
+        exit {       
+        }
+        transition when: age_days >= 1825 to: Old;       
+    }
+    
+    state Old final:true{
+        enter {
+        }
+   	if is_susceptible{
+		if is_male{
+			if flip (lambdaM){
+	do exposition_cwd;
+			}
+		}else{if flip (lambdaF){
+	do exposition_cwd;
+			}			
+		}
+	}
+	
+	if is_infected{
+		if PDseasons ="R" or "RG"{
+			if flip((annual_mortality_rateS*cwdmort_R_EG )/ 365) {
+			do die_carcass;
+	}
+		} else{
+			if flip((annual_mortality_rateS*cwdmort_Other )/ 365) {
+			do die_carcass;
+	}
+		}
+	} else{
+       if is_male {
+        	if flip(mortality_rate_oldM/365){
+        		do die;
+        	}
+        
+        }else{
+        	if flip(mortality_rate_oldF/365){
+        		do die;
+        	}
+        }
+	}
+        if age_days >=5110 {
+  	do die;
+	} 
+    }	
+}
+
+
+species carcass {
+	int time_environment;
+	grid_agent my_cell;
+	reflex scanvengers_action{
+		time_environment <-time_environment +1;
+		if time_environment >= (my_cell.carcass_scav){
+			do die;
+		}
+	}
+	aspect base {
+		draw square (500) color: #orange;
+	}
+}
+
+
+grid grid_agent files: [WEI, K, ABU, RNG, MigraN, HUNTING, SCAV] neighbors: 8 optimizer: "JPS" {
+  // Parameters for the grid agent
+  // ...
+  float Weights;
+  float CarryingK;
+  float cK;
+  int Range;
+  int migratory;
+  int hunt;
+  int scavengers;
+  int scavengersST<-scavengers;//one_of(scavengers, scavengers-2,scavengers+2);
+   string name <- "grid_" + string(self);
+  //string rangeL;
+	int abund;
+	bool burn_test <- false;
+	bool burnt <- false;
+	int neig_burnt;
+	int days_burnt;
+	int K_moment;
+	int nb_carcass;
+	int nb_expositions;
+	float carcass_scav;
+	
+	list<grid_agent> neighbors1 <- ((self neighbors_at 1));
+	list<grid_agent> neighbors2 <- ((self neighbors_at 2));
+	list<grid_agent> neighbors3 <- ((self neighbors_at 3));
+	list<grid_agent> neighbors4 <- ((self neighbors_at 4));
+	list<grid_agent> neighbors10 <- ((self neighbors_at 10));
+	list<grid_agent> neighborsManag <- neighbors1; //one_of (neighbors2,neighbors3,neighbors4) ;	
+
+// Lists to store different categories of mule_deer
+   list<mule_deer> MD_agents <- []; 
+   list<mule_deer> MD_agents1 <- []; 
+   list<mule_deer> doe_agents <- [];
+   list<mule_deer> buck_agents <- [];
+   list<mule_deer> fawn_agents <- [];
+   list<mule_deer> mixed_agents <- [];
+   list<mule_deer> yearling_agents <- [];
+   list<mule_deer> adult_agents <- [];
+   list<mule_deer> old_agents <- [];
+   list<mule_deer> mother_agents <- [];
+    list<carcass> carcass_inside <- [];
+   
+  reflex update_agent_lists {
+  MD_agents1<- mule_deer where (each.my_cell = self);
+  MD_agents<- MD_agents1 where (not each.is_solitary);
+  fawn_agents <- MD_agents where (each.state = "Fawn");
+  yearling_agents <- MD_agents where (each.state = "Yearling");
+  adult_agents <- MD_agents where (each.state = "Adult");
+  old_agents <- MD_agents where (each.state = "Old");
+  mother_agents <- MD_agents where (each.is_male = false and each.fawning);
+  doe_agents <- MD_agents where (each.is_male = false and each.state != "Fawn" and not each.fawning);
+  buck_agents <- adult_agents+old_agents where (each.is_male = true);
+  mixed_agents <- yearling_agents + buck_agents + fawn_agents + mother_agents;
+  carcass_inside<- carcass where (each.my_cell = self);
+}
+   // Reflexes for grid agent
+  // ...
+    int total_infected_deer_last_365_days;
+    int number_of_carcasses;
+    int number_of_deer ;
+    int number_of_infected_deer;
+    int number_of_infected_male_deer;
+    int number_of_male_deer;
+    int number_of_infected_female_deer;
+    int number_of_female_deer;
+    int number_of_infected_fawn_deer;
+    int number_of_fawn_deer;
+    list<int> all_infected_deer_count_history <- [];
+    list<int> infected_deer_count_history_last_365 <- [];
+ // Group sizes
+  int grdoe;
+  int grmixed;
+  int grbuck;
+  int gryearling;
+  int last_group_id <- 0;
+  
+reflex update_lists {
+// Count all mule_deer in this cell.
+
+ number_of_deer <- length(MD_agents1);
+ K_moment <- (cK) - number_of_deer;
+// Count all infected mule_deer in this cell.
+ number_of_infected_deer <- length(MD_agents1 where(each.is_infected));
+// Categorize by gender and age.
+ number_of_female_deer <- length(MD_agents where(each.is_male = false));
+ number_of_male_deer <- length(MD_agents where(each.is_male = true));
+ number_of_fawn_deer <- length(fawn_agents);
+if number_of_infected_deer>=1{
+// Calculate the number of carcasses in the cell
+ number_of_carcasses <- length(carcass_inside);
+// Categorize by gender and age.
+ number_of_infected_female_deer <- length(MD_agents where(each.is_male = false and each.is_infected));
+ number_of_infected_male_deer <- length(MD_agents where(each.is_male = true and each.is_infected));
+ number_of_infected_fawn_deer <- length(fawn_agents where(each.is_infected));
+}
+  }
+  
+
+list<mule_deer> sublist(list<mule_deer> collection, int start, int end) {
+        list<mule_deer> result <- [];
+        loop i from: start to: end {
+          result <- result + (collection at i);
+        }
+        return result;
+    }
+   
+string unique_id {
+    last_group_id <- last_group_id + 1;
+    return string(last_group_id);
+  }	
+
+// Reflex for PR, R, EG seasons
+reflex create_groups_PR_R_EG when: current_daysim = PR_start or current_daysim = R_start or current_daysim = EG_start {
+	// For does
+
+    loop while: length(doe_agents) > 3 {
+    	grdoe <- rnd(3,6);
+        list<mule_deer> doe_group <- sublist(doe_agents, 0, min(grdoe, length(doe_agents)));
+        string new_group_id <- unique_id();
+        ask doe_group {
+            my_group <- new_group_id;
+        }
+        doe_agents <- doe_agents - doe_group;
+    }
+  
+  	// For mixed group
+    loop while: length(mixed_agents) > 5 {
+    	grmixed <- rnd(5,10);
+        list<mule_deer> mixed_group <- sublist(mixed_agents, 0, min(grmixed, length(mixed_agents)));
+        string new_group_id <- unique_id();
+        ask mixed_group {
+            my_group <- new_group_id;
+        }
+        mixed_agents <- mixed_agents - mixed_group;
+    }
+}
+
+// Reflex for LG season
+reflex create_groups_LG when: current_daysim = LG_start {
+	// For bucks
+    loop while: length(buck_agents) > 3 {
+    	grbuck<- rnd(3,6);
+        list<mule_deer> buck_group <- sublist(buck_agents, 0, min(grbuck, length(buck_agents)));
+        string new_group_id <- unique_id();
+        ask buck_group {
+            my_group <- new_group_id;
+        }
+        buck_agents <- buck_agents - buck_group;
+    }
+  
+  	// Maintain doe groups as they were in PR, R, EG seasons
+}
+
+// Reflex for F season
+reflex create_groups_F when: current_daysim = F_start {
+	// For yearlings
+    loop while: length(yearling_agents) > 2 {
+    	gryearling <- rnd(2,4);
+        list<mule_deer> yearling_group <- sublist(yearling_agents, 0, min(gryearling, length(yearling_agents)));
+        string new_group_id <- unique_id();
+        ask yearling_group {
+            my_group <- new_group_id;
+        }
+        yearling_agents <- yearling_agents - yearling_group;
+    }
+  
+  	// Mothers and fawns remain in mixed groups with bucks and yearlings
+}
+
+reflex update_infected_deer_history when: number_of_infected_deer >= 1 {
+    // Add the current count to the all-time history
+    all_infected_deer_count_history <- all_infected_deer_count_history + list(number_of_infected_deer);
+
+    // Clear the 365 days history list
+    infected_deer_count_history_last_365 <- [];
+
+    // If the all-time list has more than 365 entries, update the last 365 days history
+    if length(all_infected_deer_count_history) > 365 {
+        loop i from: length(all_infected_deer_count_history) - 365 to: length(all_infected_deer_count_history) - 1 {
+            infected_deer_count_history_last_365 <- infected_deer_count_history_last_365 + list(all_infected_deer_count_history[i]);
+        }
+    } else {
+        infected_deer_count_history_last_365 <- all_infected_deer_count_history;
+    }
+
+    // Calculate the total number of infected deer that have been in the cell in the last 365 days
+    total_infected_deer_last_365_days <- sum(infected_deer_count_history_last_365);
+
+    // Assign the total count to the overlapping mule_deer
+    ask MD_agents1  where (each.is_susceptible) {
+        infected_deer_cell <- myself.total_infected_deer_last_365_days;
+    }
+}
+
+
+	bool Control_zone<-false;
+	bool target_zone<-false;
+	bool already_managed<-false;
+	int cont_initialresponse;
+	bool harvest_CWD<- false;
+
+// Calculate the target reduction ratio, randomly chosen between 10% to 30%
+// Determine the duration of the reduction in days, randomly chosen between 1 month (30 days) to 2 months (60 days)
+	float total_target;
+  	float daily_target;
+	float daily_rate;
+	int daily_carcass;
+reflex manage_zonation when: length (MD_agents1 where(each.is_detected))>=1 and not Control_zone{
+		Control_zone<- true;
+		target_zone<-true;
+		ask neighborsManag{
+			Control_zone<- true;
+		}
+	}
+	
+	//Calculations
+		 			//these will be set every time is declared management
+			 		// total_target<- number_of_deer* target_reduction_ratio; 
+		  	 		//daily_target <-  (total_target/duration_harvest);
+reflex management_CWD_outbreak when: Control_zone {
+		cont_initialresponse<-cont_initialresponse+1;
+		if not already_managed{
+			if cont_initialresponse = (initial_response-1){
+		harvest_CWD<- true;
+		daily_carcass	<- round((number_of_carcasses * carcass_rate)/duration_harvest);
+		total_target<- number_of_deer* target_reduction_ratio; 
+	 	daily_rate<- ((total_target/duration_harvest));
+		if target_zone and culling=1{
+		ask MD_agents1{
+			do die;
+			total_culled<-total_culled+myself.number_of_deer;}
+		} already_managed<-true;
+		} else if (cont_initialresponse >= (initial_response+180)){
+			already_managed<-false;
+			harvest_CWD<- false;
+			Control_zone<- false;
+			cont_initialresponse<-0;
+		}	
+		}
+		
+	}
+	
+reflex harvestCWD_mang when: harvest_CWD and (number_of_deer>=total_target){
+    	ask daily_rate among (MD_agents1) {
+        	do die;
+    }
+    if number_of_carcasses>=1{
+		ask daily_carcass among (carcass_inside){
+			do die;
+		}
+    }
+	}
+
+reflex carcass_survival when: number_of_carcasses>=1{
+	if (current_daysim >= PR_start and current_daysim <= EG_start){
+		carcass_scav<- 33.78^(-0.27*scavengersST);
+	}else if (current_daysim >= EG_start and current_daysim <= LG_start){
+		carcass_scav<- 63.24^(-0.06*scavengersST);
+	}else{
+		carcass_scav<- 71.21^(-0.24*scavengersST);
+	}
+}
+
+reflex fire_management when: seasons = "summer" and  not burnt and  not burn_test{
+  		burn_test <- true;
+  		if flip (fire_probabilityS){
+  			neig_burnt<- rnd(1,3);
+  			ask self neighbors_at neig_burnt{
+  			burnt <- true;
+  			total_infected_deer_last_365_days <-0;
+ 			}
+  		}
+  	}
+
+reflex K_fire when: burnt{
+  		days_burnt<- days_burnt+1;
+  		if days_burnt <= 365{
+  			cK <- CarryingK *0.05;
+  		} else if (days_burnt >= 366 and days_burnt <= 730){
+  				cK <- CarryingK *1.9;
+  		} else if (days_burnt >= 732 and days_burnt <= 1825){
+  				cK <- CarryingK *0.9;
+  		} else if days_burnt >= 1826{
+  				cK <- CarryingK;
+  				days_burnt<-0;
+  				burnt <- false;
+  				burn_test <- false;
+  		}
+  	}
+
+reflex hunting_mortality when: (current_daysim >= PR_start and current_daysim <= R_start) {
+    float daily_hunting_probability <- (hunt*pop_scale) / (R_start - PR_start + 1);
+    
+    // Define higher hunting probability for adult and old males
+    float male_bias <- 0.8 * daily_hunting_probability;
+    float female_or_yearling_bias <- 0.2 * daily_hunting_probability;
+    
+    ask (MD_agents1) where not (each.state = "fawn") {
+        if(is_male and (state = "adult" or state = "old")) {
+            // Apply higher hunting probability for adult and old males
+            if(flip(male_bias)) {
+                do die; 
+            }
+        } else {
+            // Apply lower hunting probability for females and yearlings
+            if(flip(female_or_yearling_bias)) {
+                do die;
+              
+            }
+        }
+    }
+}
+
+reflex K_truncation_tot when: K_moment <=(K_moment*0.02){
+		ask MD_agents1{
+			if flip (0.10) {
+				my_cell <- choose_cellK();
+			}
+		}
+	}
+
+reflex migration_summer when:seasons = "spring"  and Range =2{
+		ask MD_agents1{
+				if is_migratory{
+					if flip (0.25){
+			my_cell <- Residence_cell;
+			migrated <- true;
+				}
+				}
+			}
+	}
+
+reflex migration_winter when: seasons = "fall"  and Range =1{
+	ask MD_agents1{
+				if is_migratory{
+					if flip (0.25){
+			my_cell <- choose_cellM();
+				}
+				}
+			}	
+	}
+	
+reflex migration_scheduler when:(seasons = "summer") or (seasons = "winter"){
+	 	ask MD_agents1{
+	 		if is_migratory{
+	 			migrated<- false;
+	 		}
+	 	}
+    	  }	  
+
+//reflex ExportGridResults when: ExportSim and (cycle = (SimLeng) - 1) {
+//    save [seed, cycle, name, scavengersST, nb_carcass, nb_expositions, neighborsManag	
+//    ] to: '../results/'  + DCUs + '/Grid/Agents_' + int(seed) + '.csv' format:'csv' rewrite:false;
+//}
+}
+
+
+// ...
+experiment mule_deer_simulation type: gui {
+  // ...
+  output {
+		display map refresh: every(3 # cycles){
+			grid grid_agent border: #black;
+			species mule_deer aspect: base;
+			species carcass aspect: base;
+		}
+	display chart2 refresh: every(10 # cycles){
+			chart "Disease spreading" type: series
+			{
+		//data "Susceptible MD" value: susMD color: #dodgerblue;
+		data "Exposed MD" value: expMD color: #magenta;
+		data "Infected MD" value: infMD color: #red;
+			data "Total MD" value: MD_tot color: #blue;
+			}
+			}
+		monitor "Total MD" value: MD_tot color: #blue;
+		monitor "SUSCEPTIBLE MD" value: susMD color: #limegreen;
+		monitor "EXPOSED MD" value: expMD color: #orange;
+		monitor "INFECTED MD" value: infMD color: #red; 
+		monitor "Active carcass" value: Carc_tot color: #dodgerblue;
+		monitor "Total carcasses" value: total_carcasses color: #peru;
+		monitor "Total exposed" value: total_exposed color: #peru;
+		monitor "Total infected" value: total_infected color: #peru; //total_hunted
+		monitor "Total hunted" value: total_hunted color: #peru;
+		monitor "Total culled" value: total_culled color: #peru;
+	}
+}
+
+//experiment Batch type:batch repeat:500  until:total_days>=SimLeng{
+//	
+//}
+
+experiment Batch_ST type:batch repeat:1 keep_seed: true until:total_days>=SimLeng{
+  parameter 'detection time:' var: detection_parameter among: [ 0.8, 1.2, 2.0 ] unit: 'Number of days from infection to detection (0.1 means 10% of days in a year)';
+//parameter 'Surveillance:' var: surveillance_effect among: [ 0.7,1.0,1.3 ] unit: 'Variation of the detection time due to surveillance effort  (0.7 means 70% of days in detection time)';
+//parameter 'Initial response:' var: initial_response among: [ 15,30,60 ] unit: 'Number of days from detection to response  (30 means 30 days)';
+//parameter 'Harvest duration:' var: duration_harvest among: [ 15,30,60 ] unit: 'number of harvest days (15 means 15 days)';
+//parameter 'Population reduction by harvest:' var: target_reduction_ratio among: [ 0.1,0.2,0.3 ] unit: 'reduction rate during harvest days (0.1 means 10%)';
+//parameter 'Culling:' var: culling among: [ 0,1 ] unit: 'Culling of population in cell  (1 means yes)';
+//parameter 'Carcass degradation:' var: carcass_rate among: [ 0.3, 0.5, 0.8 ] unit: 'Number of Carcasses removed  (0.8 means 80% of carcasses)';
+//parameter 'Probability of a fire in the cell:' var: fire_probability among: [ 0.005, 0.005*2, 0.005*3 ] unit: 'yearly wildfire (0.1 means 10%)';
+
+reflex save_results_explo {
+  ask simulations {
+save [int(self),DCUs, MD_tot, cycle, self.total_exposed, self.total_infected, self.total_carcasses,total_exposed, total_infected, total_carcasses,pop_scale,
+fire_probability, total_hunted, total_culled, detection_parameter, surveillance_effect, surveillance_harvest, initial_response, culling, 
+target_reduction_ratio, duration_harvest, carcass_rate] 
+to: "results_ST_NC_detect.csv" format: "csv" header: true rewrite: false;
+}       
+}
+}
+
+//experiment stoch type: batch until: total_days>=SimLeng repeat:8 keep_simulations:false {
+//    method stochanalyse outputs:["total_exposed","total_infected","total_carcasses"] report:"../results/stochanalysisreport.txt" results:"../results/stochanalysis.csv" sample:3;
+//} 
+//
+//experiment Morris type: batch keep_seed:true until:( total_days>=SimLeng) {
+//    method morris outputs:["total_exposed"] sample:8 levels:2 report:"../results/morris.txt" results:"../results/morris_raw.csv";
+//}
+//
+//experiment Beta type: batch keep_seed:true until:( total_days>=SimLeng) {
+//    method betad outputs:["total_exposed"] sample:8 sampling:"factorial" report:"../results/betad.txt" results:"../results/beta_raw.csv";
+//}
+//
+//experiment Sobol type: batch keep_seed:true until:( total_days>=SimLeng) {
+//    method sobol outputs:["total_exposed","total_infected","total_carcasses"] sample:24 report:"../results/sobol.txt" results:"../results/sobol_raw.csv";
+//}
+
+
+
+	
