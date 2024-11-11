@@ -23,15 +23,13 @@ global {
   bool ExportSim <- true;
   bool Export_end<-true;
   bool disease_management<-true;
- //date starting_date <- date([2024,7,1,1,0,0]);
   
-  //files
+  //Input files - rasters in Ascii (weights, carrying capacity, abundance, range, migration and scavengers)
   file WEI <- file("../includes/"+ string(DCUs)+"/ARweigscale.asc");
   file K <- file("../includes/"+ string(DCUs)+"/ARK2024.asc");
   file ABU <- file("../includes/"+ string(DCUs)+"/ARabund.asc");
   file RNG <- file("../includes/"+ string(DCUs)+"/ARRangeN.asc");
   file MigraN <- file("../includes/"+ string(DCUs)+"/ARMigraN.asc");
-  //file HUNTING <- file("../includes/"+ string(DCUs)+"/ARHunt.asc");
   file SCAV <- file("../includes/"+ string(DCUs)+"/ARScav.asc");
   // Parameters for the global environment
   geometry shape <- envelope(WEI);
